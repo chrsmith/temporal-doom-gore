@@ -4152,7 +4152,7 @@ func netUpdate() {
 	var newtics, nowtime int32
 	// If we are running with singletics (timing a demo), this
 	// is all done separately.
-	if singletics != 0 {
+	if singletics != 0 || dg_step_mode {
 		return
 	}
 	// check time
@@ -4634,7 +4634,7 @@ func d_Display() {
 		borderdrawcount = 3
 	}
 	// save the current screen if about to wipe
-	if gamestate != wipegamestate {
+	if gamestate != wipegamestate && !dg_step_mode {
 		wipe = 1
 		wipe_StartScreen(0, 0, SCREENWIDTH, SCREENHEIGHT)
 	} else {
@@ -4832,7 +4832,9 @@ func d_DoomLoop() {
 		g_BeginRecording()
 	}
 	main_loop_started = 1
-	tryRunTics()
+	if !dg_step_mode {
+		tryRunTics()
+	}
 	i_SetWindowTitle(gamedescription)
 	i_GraphicsCheckCommandLine()
 	i_SetGrabMouseCallback(d_GrabMouseCallback)
@@ -4843,6 +4845,9 @@ func d_DoomLoop() {
 	d_StartGameLoop()
 	if testcontrols != 0 {
 		wipegamestate = gamestate
+	}
+	if dg_step_mode {
+		return
 	}
 	doomgeneric_Tick()
 }
@@ -17653,8 +17658,7 @@ func i_Error(errStr string, args ...any) {
 		// TODO: Expose error message somehow?
 	}
 	// abort();
-	for 1 != 0 {
-	}
+	panic(fmt.Sprintf(errStr, args...))
 }
 
 //
@@ -17739,6 +17743,10 @@ var basetime uint32 = 0
 var last_tick int32 = 0
 
 func i_GetTicks() int32 {
+	if dg_step_mode {
+		// Game time is purely logical: derived from the number of tics run.
+		return gametic * 1000 / TICRATE
+	}
 	if dg_run_full_speed {
 		// Just increment by 1 each frame
 		return int32(dg_fake_tics)
@@ -43167,7 +43175,16 @@ var saveStringEnter int32
 //	Refresh/render internal state variables (global).
 //
 
-var save_stream *os.File
+// save_stream is the stream savegames are read from/written to. It is usually
+// an *os.File, but SaveGameBytes/LoadGameBytes use an in-memory stream.
+var save_stream saveStream
+
+type saveStream interface {
+	io.Reader
+	io.Writer
+	io.Seeker
+	Close() error
+}
 
 var savegame_error boolean
 
