@@ -55,3 +55,40 @@ func TestStep(t *testing.T) {
 		t.Fatalf("tic not restored")
 	}
 }
+
+// TestSaveEveryTic saves after every tic. Removed thinkers linger in the
+// thinker list (with a nil function) until the next tic, which used to crash
+// p_ArchiveSpecials.
+func TestSaveEveryTic(t *testing.T) {
+	wadPath := os.Getenv("DOOM_WAD")
+	if wadPath == "" {
+		wadPath = "doom1.wad"
+	}
+	wad, err := os.ReadFile(wadPath)
+	if err != nil {
+		t.Skip("doom1.wad not present")
+	}
+	SetVirtualFileSystem(MemFS{"doom1.wad": wad})
+	StepInit(nil, []string{"-iwad", "doom1.wad", "-warp", "1", "1", "-skill", "3"})
+	saves := 0
+	for i := 0; i < 3000; i++ {
+		cmd := TicCmd{Forward: 0x32}
+		if i%140 < 20 {
+			cmd.AngleTurn = 1280
+		}
+		if i%9 == 0 {
+			cmd.Buttons |= ButtonAttack
+		}
+		if i%20 == 0 {
+			cmd.Buttons |= ButtonUse
+		}
+		StepTic(cmd)
+		if CanSave() {
+			if _, err := SaveGameBytes(); err != nil {
+				t.Fatalf("tic %d: %v", i, err)
+			}
+			saves++
+		}
+	}
+	t.Logf("%d saves, final stats %+v", saves, GetStats())
+}

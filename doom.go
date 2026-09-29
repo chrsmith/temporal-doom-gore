@@ -29226,7 +29226,7 @@ func p_ArchiveSpecials() {
 		if th.Ffunction == nil {
 			var i int32
 			for i = 0; i < MAXCEILINGS; i++ {
-				if &activeceilings[i].Fthinker == th {
+				if activeceilings[i] != nil && &activeceilings[i].Fthinker == th {
 					break
 				}
 			}
