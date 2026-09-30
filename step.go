@@ -85,7 +85,8 @@ func StepInit(fe DoomFrontend, args []string) {
 	myargs = append([]string{"doom"}, args...)
 	m_FindResponseFile()
 	DG_ScreenBuffer = image.NewRGBA(image.Rect(0, 0, SCREENWIDTH, SCREENHEIGHT))
-	d_DoomMain() // returns without looping in step mode
+	sound_module = &stepSoundModule // see step_sound.go
+	d_DoomMain()                    // returns without looping in step mode
 }
 
 // StepTic runs exactly one game tic, with cmd as the console player's input.
@@ -99,8 +100,10 @@ func StepTic(cmd TicCmd) {
 		Fbuttons:     cmd.Buttons,
 	}
 	ingame[consoleplayer] = 1
+	stepSoundTic = gametic + 1
 	runTic(cmds[:], ingame[:])
 	gametic++
+	stepUpdateSounds()
 }
 
 // StepRender draws the current game state into the frame buffer. It only
