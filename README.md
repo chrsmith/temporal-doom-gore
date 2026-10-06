@@ -1,3 +1,8 @@
+> This is my humble fork of the
+> [AndreRenaud/gore](https://github.com/AndreRenaud/gore)
+> repository. It exists just to land a few minor
+> changes to "port" DOOM to Temporal.
+
 # 🔥 GORE 🔥
 ## A Minimal Go Port of doomgeneric
 
