@@ -4152,7 +4152,7 @@ func netUpdate() {
 	var newtics, nowtime int32
 	// If we are running with singletics (timing a demo), this
 	// is all done separately.
-	if singletics != 0 {
+	if singletics != 0 || dg_step_mode {
 		return
 	}
 	// check time
@@ -4634,7 +4634,7 @@ func d_Display() {
 		borderdrawcount = 3
 	}
 	// save the current screen if about to wipe
-	if gamestate != wipegamestate {
+	if gamestate != wipegamestate && !dg_step_mode {
 		wipe = 1
 		wipe_StartScreen(0, 0, SCREENWIDTH, SCREENHEIGHT)
 	} else {
@@ -4832,7 +4832,9 @@ func d_DoomLoop() {
 		g_BeginRecording()
 	}
 	main_loop_started = 1
-	tryRunTics()
+	if !dg_step_mode {
+		tryRunTics()
+	}
 	i_SetWindowTitle(gamedescription)
 	i_GraphicsCheckCommandLine()
 	i_SetGrabMouseCallback(d_GrabMouseCallback)
@@ -4843,6 +4845,9 @@ func d_DoomLoop() {
 	d_StartGameLoop()
 	if testcontrols != 0 {
 		wipegamestate = gamestate
+	}
+	if dg_step_mode {
+		return
 	}
 	doomgeneric_Tick()
 }
@@ -7648,7 +7653,9 @@ func g_Ticker() {
 				players[consoleplayer].Fmessage = fmt.Sprintf("%s is turbo!", player_names[i])
 				turbodetected[i] = 0
 			}
-			if netgame != 0 && netdemo == 0 && gametic%ticdup == 0 {
+			// Step mode hosts check consistency with Checksum instead,
+			// and their ticcmds don't carry a consistancy byte.
+			if netgame != 0 && netdemo == 0 && gametic%ticdup == 0 && !dg_step_mode {
 				if gametic > BACKUPTICS && int32(consistancy[i][buf]) != int32(cmd.Fconsistancy) {
 					i_Error("consistency failure (%d should be %d)", int32(cmd.Fconsistancy), int32(consistancy[i][buf]))
 				}
@@ -7762,26 +7769,33 @@ func g_CheckSpot(playernum int32, mthing *mapthing_t) boolean {
 	var mo *mobj_t
 	var ss *subsector_t
 	var x, xa, y, ya, v2 fixed_t
-	if players[playernum].Fmo == nil {
-		// first spawn of level, before corpses
-		for i := int32(0); i < playernum; i++ {
-			if players[i].Fmo.Fx == int32(mthing.Fx)<<FRACBITS && players[i].Fmo.Fy == int32(mthing.Fy)<<FRACBITS {
-				return 0
-			}
-		}
-		return 1
-	}
 	x = int32(mthing.Fx) << FRACBITS
 	y = int32(mthing.Fy) << FRACBITS
-	if p_CheckPosition(players[playernum].Fmo, x, y) == 0 {
-		return 0
+	if players[playernum].Fmo == nil {
+		if !dg_step_mode || leveltime == 0 {
+			// first spawn of level, before corpses
+			for i := int32(0); i < playernum; i++ {
+				if players[i].Fmo != nil && players[i].Fmo.Fx == x && players[i].Fmo.Fy == y {
+					return 0
+				}
+			}
+			return 1
+		}
+		// A player joining a step mode game mid-level (see stepJoin).
+		if stepCheckSpot(playernum, mthing) == 0 {
+			return 0
+		}
+	} else {
+		if p_CheckPosition(players[playernum].Fmo, x, y) == 0 {
+			return 0
+		}
+		// flush an old corpse if needed
+		if bodyqueslot >= BODYQUESIZE {
+			p_RemoveMobj(bodyque[bodyqueslot%BODYQUESIZE])
+		}
+		bodyque[bodyqueslot%BODYQUESIZE] = players[playernum].Fmo
+		bodyqueslot++
 	}
-	// flush an old corpse if needed
-	if bodyqueslot >= BODYQUESIZE {
-		p_RemoveMobj(bodyque[bodyqueslot%BODYQUESIZE])
-	}
-	bodyque[bodyqueslot%BODYQUESIZE] = players[playernum].Fmo
-	bodyqueslot++
 	// spawn a teleport fog
 	ss = r_PointInSubsector(x, y)
 	// The code in the released source looks like this:
@@ -7875,8 +7889,11 @@ func g_DoReborn(playernum int32) {
 		gameaction = ga_loadlevel
 	} else {
 		// respawn at the start
-		// first dissasociate the corpse
-		players[playernum].Fmo.Fplayer = nil
+		// first dissasociate the corpse (a player joining a step mode
+		// game has none)
+		if players[playernum].Fmo != nil {
+			players[playernum].Fmo.Fplayer = nil
+		}
 		// spawn at random spot if in death match
 		if deathmatch != 0 {
 			g_DeathMatchSpawnPlayer(playernum)
@@ -17653,8 +17670,7 @@ func i_Error(errStr string, args ...any) {
 		// TODO: Expose error message somehow?
 	}
 	// abort();
-	for 1 != 0 {
-	}
+	panic(fmt.Sprintf(errStr, args...))
 }
 
 //
@@ -17739,6 +17755,10 @@ var basetime uint32 = 0
 var last_tick int32 = 0
 
 func i_GetTicks() int32 {
+	if dg_step_mode {
+		// Game time is purely logical: derived from the number of tics run.
+		return gametic * 1000 / TICRATE
+	}
 	if dg_run_full_speed {
 		// Just increment by 1 each frame
 		return int32(dg_fake_tics)
@@ -28112,6 +28132,10 @@ func saveg_write_pad() {
 
 // Pointers
 
+// saveg_readp reads a pointer that vanilla DOOM wrote into the savegame. It
+// was an address in the saving process, so it's meaningless here, and it
+// must never become a Go pointer: if the garbage collector scanned one that
+// happened to land on a free heap slot, the runtime would abort.
 func saveg_readp() uintptr {
 	return uintptr(int64(saveg_read32()))
 }
@@ -28162,7 +28186,7 @@ func saveg_write_mapthing_t(str *mapthing_t) {
 
 func saveg_read_actionf_t(str *thinker_func_t) {
 	// actionf_p1 acp1;
-	str = (*thinker_func_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; the function is restored after loading
 }
 
 func saveg_write_actionf_t(str *thinker_func_t) {
@@ -28182,9 +28206,11 @@ func saveg_write_actionf_t(str *thinker_func_t) {
 
 func saveg_read_thinker_t(str *thinker_t) {
 	// struct thinker_t* prev;
-	str.Fprev = (*thinker_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fprev = nil
 	// struct thinker_t* next;
-	str.Fnext = (*thinker_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fnext = nil
 	// think_t function;
 
 	saveg_read_actionf_t(&str.Ffunction)
@@ -28214,9 +28240,11 @@ func saveg_read_mobj_t(str *mobj_t) {
 	// fixed_t z;
 	str.Fz = saveg_read32()
 	// struct mobj_t* snext;
-	str.Fsnext = (*mobj_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fsnext = nil
 	// struct mobj_t* sprev;
-	str.Fsprev = (*mobj_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fsprev = nil
 	// angle_t angle;
 	str.Fangle = uint32(saveg_read32())
 	// spritenum_t sprite;
@@ -28224,11 +28252,14 @@ func saveg_read_mobj_t(str *mobj_t) {
 	// int frame;
 	str.Fframe = saveg_read32()
 	// struct mobj_t* bnext;
-	str.Fbnext = (*mobj_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fbnext = nil
 	// struct mobj_t* bprev;
-	str.Fbprev = (*mobj_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fbprev = nil
 	// struct subsector_t* subsector;
-	str.Fsubsector = (*subsector_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fsubsector = nil
 	// fixed_t floorz;
 	str.Ffloorz = saveg_read32()
 	// fixed_t ceilingz;
@@ -28248,7 +28279,8 @@ func saveg_read_mobj_t(str *mobj_t) {
 	// mobjtype_t type;
 	str.Ftype1 = saveg_read32()
 	// mobjinfo_t* info;
-	str.Finfo = (*mobjinfo_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Finfo = nil
 	// int tics;
 	str.Ftics = saveg_read32()
 	// state_t* state;
@@ -28262,7 +28294,8 @@ func saveg_read_mobj_t(str *mobj_t) {
 	// int movecount;
 	str.Fmovecount = saveg_read32()
 	// struct mobj_t* target;
-	str.Ftarget = (*mobj_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Ftarget = nil
 	// int reactiontime;
 	str.Freactiontime = saveg_read32()
 	// int threshold;
@@ -28280,7 +28313,8 @@ func saveg_read_mobj_t(str *mobj_t) {
 	// mapthing_t spawnpoint;
 	saveg_read_mapthing_t(&str.Fspawnpoint)
 	// struct mobj_t* tracer;
-	str.Ftracer = (*mobj_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Ftracer = nil
 }
 
 func saveg_write_mobj_t(str *mobj_t) {
@@ -28438,7 +28472,8 @@ func saveg_write_pspdef_t(str *pspdef_t) {
 
 func saveg_read_player_t(str *player_t) {
 	// mobj_t* mo;
-	str.Fmo = (*mobj_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fmo = nil
 	// playerstate_t playerstate;
 	str.Fplayerstate = saveg_read32()
 	// ticcmd_t cmd;
@@ -28501,13 +28536,15 @@ func saveg_read_player_t(str *player_t) {
 	// int secretcount;
 	str.Fsecretcount = saveg_read32()
 	// char* message;
-	str.Fmessage = gostring(saveg_readp())
+	saveg_readp() // a char* from the saving process; the message is cleared after loading
+	str.Fmessage = ""
 	// int damagecount;
 	str.Fdamagecount = saveg_read32()
 	// int bonuscount;
 	str.Fbonuscount = saveg_read32()
 	// mobj_t* attacker;
-	str.Fattacker = (*mobj_t)(unsafe.Pointer(saveg_readp()))
+	saveg_readp() // a pointer from the saving process; fixed up after loading
+	str.Fattacker = nil
 	// int extralight;
 	str.Fextralight = saveg_read32()
 	// int fixedcolormap;
@@ -29218,7 +29255,7 @@ func p_ArchiveSpecials() {
 		if th.Ffunction == nil {
 			var i int32
 			for i = 0; i < MAXCEILINGS; i++ {
-				if &activeceilings[i].Fthinker == th {
+				if activeceilings[i] != nil && &activeceilings[i].Fthinker == th {
 					break
 				}
 			}
@@ -43167,7 +43204,16 @@ var saveStringEnter int32
 //	Refresh/render internal state variables (global).
 //
 
-var save_stream *os.File
+// save_stream is the stream savegames are read from/written to. It is usually
+// an *os.File, but SaveGameBytes/LoadGameBytes use an in-memory stream.
+var save_stream saveStream
+
+type saveStream interface {
+	io.Reader
+	io.Writer
+	io.Seeker
+	Close() error
+}
 
 var savegame_error boolean
 
